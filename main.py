@@ -5,6 +5,7 @@ from models.schemas import SlackMessage, PayslipInput
 from services.supabase_client import supabase
 from agents.extractor import extract_payslip
 from agents.legal import classify_all
+from agents.supervisor import handle_message
 
 app = FastAPI()
 
@@ -14,11 +15,11 @@ def root():
 
 @app.post("/slack/mensagem")
 def receive_message(message: SlackMessage):
-    result = supabase.table("discoveries").insert({
-        "company": message.texto,
-        "status": "started"
-    }).execute()
-    return {"resposta": f"Discovery iniciado para: {message.texto}"}
+    response = handle_message(
+        text=message.texto,
+        channel_id=message.channel_id
+    )
+    return {"resposta": response}
 
 @app.post("/extract")
 def extract(input: PayslipInput):
