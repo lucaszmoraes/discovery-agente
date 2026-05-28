@@ -2,7 +2,9 @@ import json
 from services.supabase_client import supabase
 from agents.extractor import extract_payslip
 from agents.legal import classify_all
-
+from agents.blueprint import generate_calculation_order
+from services.pdf_generator import generate_blueprint_pdf
+from services.slack_uploader import upload_pdf_to_slack
 
 def get_active_discovery(channel_id: str) -> dict | None:
     result = supabase.table("discoveries")\
@@ -56,7 +58,7 @@ def handle_message(text: str, channel_id: str) -> str:
             return "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Cole um holerite primeiro."
 
         update_discovery(discovery["id"], {"status": "completed"})
-        return format_blueprint(discovery)
+        return format_blueprint(discovery, channel_id)
 
     # Verifica se há discovery ativo aguardando resposta
     discovery = get_active_discovery(channel_id)
@@ -159,31 +161,33 @@ def handle_human_response(response_text: str, discovery: dict, current_question:
     )
 
 
-def format_blueprint(discovery: dict) -> str:
+def format_blueprint(discovery: dict, channel_id: str) -> str:
     rubricas = discovery.get("rubricas", [])
     company = discovery.get("company", "")
 
-    lines = [f"✅ [PLANTA] *Discovery concluído — {company}*\n"]
-    lines.append(f"Total de rubricas: {len(rubricas)}\n")
+    # Gera o grafo de ordem de cálculo
+    order_data = generate_calculation_order(rubricas)
 
-    proventos = [r for r in rubricas if r.get("tipo") == "provento"]
-    descontos = [r for r in rubricas if r.get("tipo") == "desconto"]
+    # Gera o PDF
+    pdf_bytes = generate_blueprint_pdf(discovery, order_data)
 
-    lines.append("*PROVENTOS*")
-    for r in proventos:
-        lines.append(
-            f"• *{r['nome']}* — {r.get('natureza', '?')} | "
-            f"INSS: {'✓' if r.get('incide_inss') else '✗'} "
-            f"IRRF: {'✓' if r.get('incide_irrf') else '✗'} "
-            f"FGTS: {'✓' if r.get('incide_fgts') else '✗'} | "
-            f"Confiança: {r.get('confianca', '?')}"
-        )
+    # Monta mensagem de sumário para o Slack
+    total = len(rubricas)
+    alta = len([r for r in rubricas if r.get("confianca") == "alta"])
+    media = len([r for r in rubricas if r.get("confianca") == "media"])
+    baixa = len([r for r in rubricas if r.get("confianca") == "baixa"])
 
-    lines.append("\n*DESCONTOS*")
-    for r in descontos:
-        lines.append(
-            f"• *{r['nome']}* — {r.get('natureza', '?')} | "
-            f"Confiança: {r.get('confianca', '?')}"
-        )
+    summary = (
+        f"✅ [PLANTA] Discovery concluído — *{company}*\n"
+        f"Total de rubricas: {total} | "
+        f"✅ {alta} confirmadas | "
+        f"⚠️ {media} revisar | "
+        f"❌ {baixa} requer decisão\n\n"
+        f"Planta completa em anexo."
+    )
 
-    return "\n".join(lines)
+    # Faz upload do PDF no Slack
+    filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
+    upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary)
+
+    return summary

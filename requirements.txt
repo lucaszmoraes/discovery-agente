@@ -25,6 +25,7 @@ mmh3==5.2.1
 multidict==6.7.1
 openai==2.38.0
 packaging==26.2
+pillow==12.2.0
 postgrest==2.30.0
 propcache==0.5.2
 pycparser==3.0
@@ -38,6 +39,7 @@ pyroaring==1.1.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 realtime==2.30.0
+reportlab==4.5.1
 requests==2.34.2
 rich==14.3.4
 six==1.17.0
