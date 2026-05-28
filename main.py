@@ -1,8 +1,9 @@
 import os
 import uvicorn
 from fastapi import FastAPI
-from models.schemas import SlackMessage
+from models.schemas import SlackMessage, PayslipInput
 from services.supabase_client import supabase
+from agents.extractor import extract_payslip
 
 app = FastAPI()
 
@@ -16,8 +17,12 @@ def receive_message(message: SlackMessage):
         "company": message.texto,
         "status": "started"
     }).execute()
-
     return {"resposta": f"Discovery iniciado para: {message.texto}"}
+
+@app.post("/extract")
+def extract(input: PayslipInput):
+    result = extract_payslip(input.payslip)
+    return result
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
