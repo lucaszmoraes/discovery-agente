@@ -9,7 +9,7 @@ def upload_pdf_to_slack(pdf_bytes: bytes, filename: str, channel_id: str, messag
     response = requests.post(
         "https://slack.com/api/files.getUploadURLExternal",
         headers={"Authorization": f"Bearer {token}"},
-        json={
+        data={
             "filename": filename,
             "length": len(pdf_bytes)
         }
@@ -30,7 +30,7 @@ def upload_pdf_to_slack(pdf_bytes: bytes, filename: str, channel_id: str, messag
     )
 
     # Passo 3: finaliza e posta no canal
-    requests.post(
+    complete_response = requests.post(
         "https://slack.com/api/files.completeUploadExternal",
         headers={"Authorization": f"Bearer {token}"},
         json={
@@ -40,4 +40,4 @@ def upload_pdf_to_slack(pdf_bytes: bytes, filename: str, channel_id: str, messag
         }
     )
 
-    return True
+    return complete_response.json().get("ok", False)
