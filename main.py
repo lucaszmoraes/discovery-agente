@@ -41,3 +41,10 @@ def classify(input: PayslipInput):
     classified = classify_all(extracted["rubricas"])
     
     return {"rubricas": classified}
+
+@app.get("/test-slack")
+def test_slack():
+    from services.slack_uploader import upload_pdf_to_slack
+    pdf_bytes = b"teste"
+    result = upload_pdf_to_slack(pdf_bytes, "teste.pdf", "C0B6P8356GM", "teste de upload")
+    return {"result": result}
