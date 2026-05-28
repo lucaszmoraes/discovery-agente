@@ -1,20 +1,10 @@
 import os
 import uvicorn
 from fastapi import FastAPI
-from pydantic import BaseModel
-from supabase import create_client
+from models.schemas import SlackMessage
+from services.supabase_client import supabase
 
 app = FastAPI()
-
-# Lê as variáveis de ambiente que configuramos no Railway
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-# Cria o cliente Supabase
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-class SlackMessage(BaseModel):
-    texto: str
 
 @app.get("/")
 def root():
@@ -22,7 +12,6 @@ def root():
 
 @app.post("/slack/mensagem")
 def receive_message(message: SlackMessage):
-    # Cria um novo discovery no Supabase
     result = supabase.table("discoveries").insert({
         "company": message.texto,
         "status": "started"
