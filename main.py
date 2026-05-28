@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from models.schemas import SlackMessage, PayslipInput
 from services.supabase_client import supabase
 from agents.extractor import extract_payslip
+from agents.legal import classify_all
 
 app = FastAPI()
 
@@ -27,3 +28,15 @@ def extract(input: PayslipInput):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+@app.post("/classify")
+def classify(input: PayslipInput):
+    from agents.extractor import extract_payslip
+    
+    # Extrai as rubricas do holerite
+    extracted = extract_payslip(input.payslip)
+    
+    # Classifica cada rubrica com RAG
+    classified = classify_all(extracted["rubricas"])
+    
+    return {"rubricas": classified}

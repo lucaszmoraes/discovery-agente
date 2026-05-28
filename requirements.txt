@@ -36,6 +36,7 @@ PyJWT==2.13.0
 pyparsing==3.3.2
 pyroaring==1.1.0
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
 realtime==2.30.0
 requests==2.34.2
 rich==14.3.4
