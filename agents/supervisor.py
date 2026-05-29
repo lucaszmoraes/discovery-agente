@@ -1,8 +1,11 @@
+# supervisor.py
+
 import json
 from services.supabase_client import supabase
 from agents.extractor import extract_payslip
 from agents.legal import classify_all
 from agents.blueprint import generate_calculation_order
+from agents.interviewer import process_response
 from services.pdf_generator import generate_blueprint_pdf
 from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
 
@@ -45,7 +48,6 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
     if text_clean.startswith("iniciar"):
         parts = text.strip().split(" ", 1)
         company = parts[1] if len(parts) > 1 else "empresa não informada"
-
         discovery = create_discovery(company, channel_id, thread_ts)
         msg = f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\nCole o holerite em Markdown para começar a extração."
         post_message_to_slack(channel_id, msg, thread_ts)
@@ -70,15 +72,15 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         format_blueprint(discovery, channel_id, saved_thread_ts)
         return ""
 
-    # Verifica se há discovery ativo aguardando resposta
+    # Verifica discovery ativo
     discovery = get_active_discovery(channel_id)
 
     if discovery:
         saved_thread_ts = discovery.get("thread_ts") or thread_ts
-        current_question = discovery.get("current_question")
+        pending = discovery.get("pending_questions", [])
 
-        if current_question and discovery["status"] == "awaiting_response":
-            handle_human_response(text, discovery, current_question, saved_thread_ts)
+        if pending and discovery["status"] == "awaiting_response":
+            handle_human_response(text, discovery, pending, saved_thread_ts)
             return ""
 
         handle_payslip(text, discovery, saved_thread_ts)
@@ -94,81 +96,97 @@ def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) ->
 
     extracted = extract_payslip(payslip_text)
     rubricas = extracted.get("rubricas", [])
-
     classified = classify_all(rubricas)
 
     pending = [r for r in classified if r.get("confianca") == "baixa"]
     resolved = [r for r in classified if r.get("confianca") != "baixa"]
 
-    updates = {
-        "rubricas": resolved,
-        "pending_questions": pending
-    }
+    updates = {"rubricas": resolved}
 
     if pending:
-        first_question = pending[0]
         updates["status"] = "awaiting_response"
-        updates["current_question"] = first_question
-        updates["pending_questions"] = pending[1:]
-
+        updates["pending_questions"] = pending
+        updates["current_question"] = None
         update_discovery(discovery["id"], updates)
 
         msg = (
             f"🔍 [DISCOVERY] Extraí e classifiquei {len(classified)} rubricas para *{discovery['company']}*.\n"
-            f"{len(resolved)} resolvidas automaticamente, {len(pending)} precisam de esclarecimento.\n\n"
-            f"❓ [PERGUNTA] Sobre a rubrica *{first_question['nome']}*:\n"
-            f"{first_question.get('observacao', 'Preciso de mais informações sobre esta rubrica.')}\n\n"
-            f"Como ela é calculada e qual sua natureza (salarial ou indenizatória)?"
+            f"{len(resolved)} classificadas com alta confiança. "
+            f"{len(pending)} precisam de esclarecimento.\n\n"
+            f"{_format_pending_message(pending)}\n\n"
+            f"Responda sobre quantas quiser em uma ou mais mensagens. "
+            f"Quando terminar, digite `gerar`."
         )
         post_message_to_slack(discovery["channel_id"], msg, thread_ts)
         return
 
     updates["status"] = "classified"
+    updates["pending_questions"] = []
+    updates["current_question"] = None
     update_discovery(discovery["id"], updates)
 
     msg = (
-        f"🔍 [DISCOVERY] Extraí e classifiquei {len(classified)} rubricas para *{discovery['company']}* com alta confiança.\n\n"
+        f"🔍 [DISCOVERY] Extraí e classifiquei {len(classified)} rubricas para "
+        f"*{discovery['company']}* com alta confiança.\n\n"
         f"Digite `gerar` para produzir a planta final."
     )
     post_message_to_slack(discovery["channel_id"], msg, thread_ts)
 
 
-def handle_human_response(response_text: str, discovery: dict, current_question: dict, thread_ts: str = None) -> None:
-    current_question["resposta_humana"] = response_text
-    current_question["confianca"] = "media"
+def handle_human_response(response_text: str, discovery: dict, pending: list, thread_ts: str = None) -> None:
+    result = process_response(response_text, pending)
 
-    resolved = discovery.get("rubricas", []) + [current_question]
-    pending = discovery.get("pending_questions", [])
+    closed = result["closed"]
+    still_pending = result["still_pending"]
 
-    if pending:
-        next_question = pending[0]
-        remaining = pending[1:]
+    resolved = discovery.get("rubricas", []) + closed
 
+    if still_pending:
         update_discovery(discovery["id"], {
             "rubricas": resolved,
-            "current_question": next_question,
-            "pending_questions": remaining,
+            "pending_questions": still_pending,
             "status": "awaiting_response"
         })
 
+        closed_names = [r["nome"] for r in closed]
+        closed_text = (
+            f"✅ Esclarecidas: {', '.join(closed_names)}\n\n"
+            if closed_names else ""
+        )
+
         msg = (
-            f"✅ Resposta registrada para *{current_question['nome']}*.\n\n"
-            f"❓ [PERGUNTA] Sobre a rubrica *{next_question['nome']}*:\n"
-            f"{next_question.get('observacao', 'Preciso de mais informações.')}\n\n"
-            f"Como ela é calculada e qual sua natureza?"
+            f"{closed_text}"
+            f"❓ [PENDÊNCIAS RESTANTES] Ainda preciso de esclarecimento sobre:\n\n"
+            f"{_format_pending_message(still_pending)}\n\n"
+            f"Responda sobre quantas quiser, ou digite `gerar` para fechar com as pendências marcadas."
         )
         post_message_to_slack(discovery["channel_id"], msg, thread_ts)
         return
 
+    # Tudo fechado
     update_discovery(discovery["id"], {
         "rubricas": resolved,
-        "current_question": None,
         "pending_questions": [],
+        "current_question": None,
         "status": "classified"
     })
 
-    msg = "✅ Todas as rubricas esclarecidas.\n\nDigite `gerar` para produzir a planta final."
+    msg = (
+        f"✅ Todas as rubricas esclarecidas.\n\n"
+        f"Digite `gerar` para produzir a planta final."
+    )
     post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+
+
+def _format_pending_message(pending: list) -> str:
+    """Formats all pending rubricas into a single readable message."""
+    lines = ["❓ [PERGUNTAS] Preciso de esclarecimento sobre as seguintes rubricas:\n"]
+    for i, r in enumerate(pending, 1):
+        lines.append(
+            f"*{i}. {r['nome']}*\n"
+            f"{r.get('observacao', 'Preciso de mais informações sobre esta rubrica.')}\n"
+        )
+    return "\n".join(lines)
 
 
 def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) -> None:
