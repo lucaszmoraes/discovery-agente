@@ -74,6 +74,7 @@ def generate_blueprint_pdf(discovery: dict, order_data: dict = None) -> bytes:
         for r in alertas:
             elements.append(Paragraph(f"! {r.get('nome')}: {r.get('observacao', '')}", alert_style))
 
+
     # Proventos
     elements.append(Paragraph("Proventos", section_style))
     prov_data = [[
@@ -100,9 +101,10 @@ def generate_blueprint_pdf(discovery: dict, order_data: dict = None) -> bytes:
             Paragraph(_certeza_text(r.get("confianca", "")), cell_style)
         ])
 
-        prov_table = Table(prov_data, colWidths=[3.5*cm, 2*cm, 10.1*cm, 1.5*cm, 1.5*cm, 1.5*cm, 1.3*cm, 0.9*cm, 1.9*cm])
+    prov_table = Table(prov_data, colWidths=[3.5*cm, 2*cm, 10.1*cm, 1.5*cm, 1.5*cm, 1.5*cm, 1.3*cm, 0.9*cm, 1.9*cm])
     prov_table.setStyle(_table_style())
     elements.append(prov_table)
+
 
     # Descontos
     elements.append(Paragraph("Descontos", section_style))
