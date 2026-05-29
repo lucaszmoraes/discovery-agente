@@ -4,7 +4,7 @@ from agents.extractor import extract_payslip
 from agents.legal import classify_all
 from agents.blueprint import generate_calculation_order
 from services.pdf_generator import generate_blueprint_pdf
-from services.slack_uploader import upload_pdf_to_slack
+from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
 
 def get_active_discovery(channel_id: str) -> dict | None:
     result = supabase.table("discoveries")\
@@ -165,13 +165,9 @@ def format_blueprint(discovery: dict, channel_id: str) -> str:
     rubricas = discovery.get("rubricas", [])
     company = discovery.get("company", "")
 
-    # Gera o grafo de ordem de cálculo
     order_data = generate_calculation_order(rubricas)
-
-    # Gera o PDF
     pdf_bytes = generate_blueprint_pdf(discovery, order_data)
 
-    # Monta mensagem de sumário para o Slack
     total = len(rubricas)
     alta = len([r for r in rubricas if r.get("confianca") == "alta"])
     media = len([r for r in rubricas if r.get("confianca") == "media"])
@@ -186,8 +182,20 @@ def format_blueprint(discovery: dict, channel_id: str) -> str:
         f"Planta completa em anexo."
     )
 
-    # Faz upload do PDF no Slack
     filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
     upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary)
+
+    # Componente 3 — Pendências
+    pendencias = [r for r in rubricas if r.get("confianca") != "alta"]
+    if pendencias:
+        linhas = ["⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
+        for r in pendencias:
+            nivel = "Revisar" if r.get("confianca") == "media" else "Decidir"
+            linhas.append(f"• *{r.get('nome')}* — {nivel}: {r.get('observacao', '')}")
+        pendencias_msg = "\n".join(linhas)
+    else:
+        pendencias_msg = "✅ [PENDÊNCIAS] Sem pendências — todas as rubricas foram classificadas com alta confiança."
+
+    post_message_to_slack(channel_id, pendencias_msg)
 
     return summary

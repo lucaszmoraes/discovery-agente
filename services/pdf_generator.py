@@ -124,6 +124,29 @@ def generate_blueprint_pdf(discovery: dict, order_data: dict = None) -> bytes:
     desc_table.setStyle(_table_style())
     elements.append(desc_table)
 
+    # Dependências
+    if order_data:
+        dep_map = _build_dep_map(rubricas, order_data)
+        elements.append(Paragraph("Dependências", section_style))
+
+        dep_data = [[
+            Paragraph("Rubrica", header_style),
+            Paragraph("Depende de", header_style),
+            Paragraph("Dispara", header_style)
+        ]]
+        for r in rubricas:
+            nome = r.get("nome", "")
+            deps = dep_map.get(nome, {})
+            dep_data.append([
+                Paragraph(nome, cell_style),
+                Paragraph(", ".join(deps.get("depende_de", [])) or "—", cell_style),
+                Paragraph(", ".join(deps.get("dispara", [])) or "—", cell_style)
+            ])
+
+        dep_table = Table(dep_data, colWidths=[5*cm, 9*cm, 9*cm])
+        dep_table.setStyle(_table_style())
+        elements.append(dep_table)
+
     # Ordem de cálculo
     if order_data:
         elements.append(Paragraph("Ordem de Cálculo", section_style))
@@ -183,3 +206,20 @@ def _table_style():
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
     ])
+
+
+def _build_dep_map(rubricas: list, order_data: dict) -> dict:
+    rubrica_names = {r.get("nome") for r in rubricas}
+    dep_map = {name: {"depende_de": [], "dispara": []} for name in rubrica_names}
+
+    for step in order_data.get("ordem", []):
+        name = step.get("rubrica", "")
+        if name not in rubrica_names:
+            continue
+        deps = [d for d in step.get("depende_de", []) if d in rubrica_names]
+        dep_map[name]["depende_de"] = deps
+        for dep in deps:
+            if dep in dep_map:
+                dep_map[dep]["dispara"].append(name)
+
+    return dep_map
