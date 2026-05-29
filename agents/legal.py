@@ -1,3 +1,5 @@
+# legal.py
+
 import os
 import json
 from openai import OpenAI
@@ -53,7 +55,7 @@ Para cada rubrica, retorne APENAS um JSON válido, sem texto adicional, no forma
   "reflexo_13": true ou false,
   "confianca": "alta", "media" ou "baixa",
   "base_legal": "artigo ou súmula que fundamenta a classificação",
-  "observacao": "explique por que a confiança não é alta, qual informação falta e qual o risco se classificado errado"
+  "observacao": "duas partes obrigatórias, separadas por quebra de linha: (1) motivo da dúvida em uma frase direta com a base legal ou princípio que gera a incerteza (ex: 'Bônus habitual integra o salário conforme CLT Art. 457 §1º, mas sem política interna não é possível confirmar a habitualidade.'); (2) uma pergunta direta e cirúrgica que, se respondida, sanará a dúvida (ex: 'O bônus é pago todo mês com valor previsível, ou é eventual e discricionário?')"
 }"""
             },
             {
