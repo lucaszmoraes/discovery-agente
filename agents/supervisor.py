@@ -6,6 +6,7 @@ from agents.blueprint import generate_calculation_order
 from services.pdf_generator import generate_blueprint_pdf
 from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
 
+
 def get_active_discovery(channel_id: str) -> dict | None:
     result = supabase.table("discoveries")\
         .select("*")\
@@ -20,11 +21,12 @@ def get_active_discovery(channel_id: str) -> dict | None:
     return None
 
 
-def create_discovery(company: str, channel_id: str) -> dict:
+def create_discovery(company: str, channel_id: str, thread_ts: str = None) -> dict:
     result = supabase.table("discoveries").insert({
         "company": company,
         "channel_id": channel_id,
-        "status": "started"
+        "status": "started",
+        "thread_ts": thread_ts
     }).execute()
     return result.data[0]
 
@@ -36,7 +38,7 @@ def update_discovery(discovery_id: str, updates: dict):
         .execute()
 
 
-def handle_message(text: str, channel_id: str) -> str:
+def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
     text_clean = text.strip().lower()
 
     # Comando: iniciar [empresa]
@@ -44,53 +46,60 @@ def handle_message(text: str, channel_id: str) -> str:
         parts = text.strip().split(" ", 1)
         company = parts[1] if len(parts) > 1 else "empresa não informada"
 
-        discovery = create_discovery(company, channel_id)
-        return f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\nCole o holerite em Markdown para começar a extração."
+        discovery = create_discovery(company, channel_id, thread_ts)
+        msg = f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\nCole o holerite em Markdown para começar a extração."
+        post_message_to_slack(channel_id, msg, thread_ts)
+        return ""
 
     # Comando: gerar
     if text_clean == "gerar":
         discovery = get_active_discovery(channel_id)
         if not discovery:
-            return "❌ Nenhum discovery ativo neste canal. Use `iniciar [empresa]` para começar."
+            msg = "❌ Nenhum discovery ativo neste canal. Use `iniciar [empresa]` para começar."
+            post_message_to_slack(channel_id, msg, thread_ts)
+            return ""
 
         rubricas = discovery.get("rubricas", [])
         if not rubricas:
-            return "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Cole um holerite primeiro."
+            msg = "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Cole um holerite primeiro."
+            post_message_to_slack(channel_id, msg, thread_ts)
+            return ""
 
         update_discovery(discovery["id"], {"status": "completed"})
-        return format_blueprint(discovery, channel_id)
+        saved_thread_ts = discovery.get("thread_ts") or thread_ts
+        format_blueprint(discovery, channel_id, saved_thread_ts)
+        return ""
 
     # Verifica se há discovery ativo aguardando resposta
     discovery = get_active_discovery(channel_id)
 
     if discovery:
+        saved_thread_ts = discovery.get("thread_ts") or thread_ts
         current_question = discovery.get("current_question")
 
-        # Há uma pergunta aguardando resposta humana
         if current_question and discovery["status"] == "awaiting_response":
-            return handle_human_response(text, discovery, current_question)
+            handle_human_response(text, discovery, current_question, saved_thread_ts)
+            return ""
 
-        # Discovery ativo mas sem pergunta pendente — interpreta como holerite
-        return handle_payslip(text, discovery)
+        handle_payslip(text, discovery, saved_thread_ts)
+        return ""
 
-    return "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
+    msg = "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
+    post_message_to_slack(channel_id, msg, thread_ts)
+    return ""
 
 
-def handle_payslip(payslip_text: str, discovery: dict) -> str:
+def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) -> None:
     update_discovery(discovery["id"], {"status": "processing"})
 
-    # Extrai rubricas
     extracted = extract_payslip(payslip_text)
     rubricas = extracted.get("rubricas", [])
 
-    # Classifica com RAG
     classified = classify_all(rubricas)
 
-    # Separa rubricas com confiança baixa para perguntar ao humano
     pending = [r for r in classified if r.get("confianca") == "baixa"]
     resolved = [r for r in classified if r.get("confianca") != "baixa"]
 
-    # Salva estado
     updates = {
         "rubricas": resolved,
         "pending_questions": pending
@@ -104,25 +113,27 @@ def handle_payslip(payslip_text: str, discovery: dict) -> str:
 
         update_discovery(discovery["id"], updates)
 
-        return (
+        msg = (
             f"🔍 [DISCOVERY] Extraí e classifiquei {len(classified)} rubricas para *{discovery['company']}*.\n"
             f"{len(resolved)} resolvidas automaticamente, {len(pending)} precisam de esclarecimento.\n\n"
             f"❓ [PERGUNTA] Sobre a rubrica *{first_question['nome']}*:\n"
             f"{first_question.get('observacao', 'Preciso de mais informações sobre esta rubrica.')}\n\n"
             f"Como ela é calculada e qual sua natureza (salarial ou indenizatória)?"
         )
+        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        return
 
     updates["status"] = "classified"
     update_discovery(discovery["id"], updates)
 
-    return (
+    msg = (
         f"🔍 [DISCOVERY] Extraí e classifiquei {len(classified)} rubricas para *{discovery['company']}* com alta confiança.\n\n"
         f"Digite `gerar` para produzir a planta final."
     )
+    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
 
 
-def handle_human_response(response_text: str, discovery: dict, current_question: dict) -> str:
-    # Adiciona a resposta à rubrica e marca como resolvida
+def handle_human_response(response_text: str, discovery: dict, current_question: dict, thread_ts: str = None) -> None:
     current_question["resposta_humana"] = response_text
     current_question["confianca"] = "media"
 
@@ -140,14 +151,15 @@ def handle_human_response(response_text: str, discovery: dict, current_question:
             "status": "awaiting_response"
         })
 
-        return (
+        msg = (
             f"✅ Resposta registrada para *{current_question['nome']}*.\n\n"
             f"❓ [PERGUNTA] Sobre a rubrica *{next_question['nome']}*:\n"
             f"{next_question.get('observacao', 'Preciso de mais informações.')}\n\n"
             f"Como ela é calculada e qual sua natureza?"
         )
+        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        return
 
-    # Sem mais perguntas
     update_discovery(discovery["id"], {
         "rubricas": resolved,
         "current_question": None,
@@ -155,13 +167,11 @@ def handle_human_response(response_text: str, discovery: dict, current_question:
         "status": "classified"
     })
 
-    return (
-        f"✅ Todas as rubricas esclarecidas.\n\n"
-        f"Digite `gerar` para produzir a planta final."
-    )
+    msg = "✅ Todas as rubricas esclarecidas.\n\nDigite `gerar` para produzir a planta final."
+    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
 
 
-def format_blueprint(discovery: dict, channel_id: str) -> str:
+def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) -> None:
     rubricas = discovery.get("rubricas", [])
     company = discovery.get("company", "")
 
@@ -183,9 +193,8 @@ def format_blueprint(discovery: dict, channel_id: str) -> str:
     )
 
     filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
-    upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary)
+    upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary, thread_ts)
 
-    # Componente 3 — Pendências
     pendencias = [r for r in rubricas if r.get("confianca") != "alta"]
     if pendencias:
         linhas = ["⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
@@ -196,6 +205,4 @@ def format_blueprint(discovery: dict, channel_id: str) -> str:
     else:
         pendencias_msg = "✅ [PENDÊNCIAS] Sem pendências — todas as rubricas foram classificadas com alta confiança."
 
-    post_message_to_slack(channel_id, pendencias_msg)
-
-    return summary
+    post_message_to_slack(channel_id, pendencias_msg, thread_ts)

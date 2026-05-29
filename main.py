@@ -15,11 +15,12 @@ def root():
 
 @app.post("/slack/mensagem")
 def receive_message(message: SlackMessage):
-    response = handle_message(
+    handle_message(
         text=message.texto,
-        channel_id=message.channel_id
+        channel_id=message.channel_id,
+        thread_ts=message.thread_ts
     )
-    return {"resposta": response}
+    return {"resposta": ""}
 
 @app.post("/extract")
 def extract(input: PayslipInput):
@@ -33,13 +34,8 @@ if __name__ == "__main__":
 @app.post("/classify")
 def classify(input: PayslipInput):
     from agents.extractor import extract_payslip
-    
-    # Extrai as rubricas do holerite
     extracted = extract_payslip(input.payslip)
-    
-    # Classifica cada rubrica com RAG
     classified = classify_all(extracted["rubricas"])
-    
     return {"rubricas": classified}
 
 @app.get("/test-slack")
