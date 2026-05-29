@@ -210,9 +210,6 @@ def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) ->
         f"Planta completa em anexo."
     )
 
-    filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
-    upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary, thread_ts)
-
     pendencias = [r for r in rubricas if r.get("confianca") != "alta"]
     if pendencias:
         linhas = ["⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
@@ -224,3 +221,6 @@ def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) ->
         pendencias_msg = "✅ [PENDÊNCIAS] Sem pendências — todas as rubricas foram classificadas com alta confiança."
 
     post_message_to_slack(channel_id, pendencias_msg, thread_ts)
+
+    filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
+    upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary, thread_ts)
