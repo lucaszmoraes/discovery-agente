@@ -201,26 +201,25 @@ def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) ->
     media = len([r for r in rubricas if r.get("confianca") == "media"])
     baixa = len([r for r in rubricas if r.get("confianca") == "baixa"])
 
-    summary = (
-        f"✅ [PLANTA] Discovery concluído — *{company}*\n"
-        f"Total de rubricas: {total} | "
-        f"✅ {alta} confirmadas | "
-        f"⚠️ {media} revisar | "
-        f"❌ {baixa} requer decisão\n\n"
-        f"Planta completa em anexo."
-    )
-
     pendencias = [r for r in rubricas if r.get("confianca") != "alta"]
     if pendencias:
-        linhas = ["⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
+        linhas = ["\n⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
         for r in pendencias:
             nivel = "Revisar" if r.get("confianca") == "media" else "Decidir"
             linhas.append(f"• *{r.get('nome')}* — {nivel}: {r.get('observacao', '')}")
         pendencias_msg = "\n".join(linhas)
     else:
-        pendencias_msg = "✅ [PENDÊNCIAS] Sem pendências — todas as rubricas foram classificadas com alta confiança."
+        pendencias_msg = "\n✅ Sem pendências — todas as rubricas classificadas com alta confiança."
 
-    post_message_to_slack(channel_id, pendencias_msg, thread_ts)
+    summary = (
+        f"✅ [PLANTA] Discovery concluído — *{company}*\n"
+        f"Total de rubricas: {total} | "
+        f"✅ {alta} confirmadas | "
+        f"⚠️ {media} revisar | "
+        f"❌ {baixa} requer decisão\n"
+        f"Planta completa em anexo."
+        f"{pendencias_msg}"
+    )
 
     filename = f"planta_{company.lower().replace(' ', '_')}.pdf"
     upload_pdf_to_slack(pdf_bytes, filename, channel_id, summary, thread_ts)
