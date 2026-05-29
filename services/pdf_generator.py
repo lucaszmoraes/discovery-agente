@@ -100,7 +100,7 @@ def generate_blueprint_pdf(discovery: dict, order_data: dict = None) -> bytes:
             Paragraph(_certeza_text(r.get("confianca", "")), cell_style)
         ])
 
-		prov_table = Table(prov_data, colWidths=[4*cm, 2.5*cm, 10.6*cm, 1*cm, 1*cm, 1*cm, 1.3*cm, 0.9*cm, 1.9*cm])
+    prov_table = Table(prov_data, colWidths=[4*cm, 2.5*cm, 10.6*cm, 1*cm, 1*cm, 1*cm, 1.3*cm, 0.9*cm, 1.9*cm])
     prov_table.setStyle(_table_style())
     elements.append(prov_table)
 
@@ -120,7 +120,7 @@ def generate_blueprint_pdf(discovery: dict, order_data: dict = None) -> bytes:
             Paragraph(_certeza_text(r.get("confianca", "")), cell_style)
         ])
 
-		desc_table = Table(desc_data, colWidths=[3.5*cm, 3*cm, 17*cm, 2.2*cm])
+    desc_table = Table(desc_data, colWidths=[3.5*cm, 3*cm, 17*cm, 2.2*cm])
     desc_table.setStyle(_table_style())
     elements.append(desc_table)
 
