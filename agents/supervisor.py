@@ -8,6 +8,11 @@ from agents.blueprint import generate_calculation_order
 from agents.interviewer import process_response
 from services.pdf_generator import generate_blueprint_pdf
 from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
+from services.rag import index_document
+from openai import OpenAI
+import os
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 def get_active_discovery(channel_id: str) -> dict | None:
@@ -18,7 +23,6 @@ def get_active_discovery(channel_id: str) -> dict | None:
         .order("created_at", desc=True)\
         .limit(1)\
         .execute()
-
     if result.data:
         return result.data[0]
     return None
@@ -29,6 +33,7 @@ def create_discovery(company: str, channel_id: str, thread_ts: str = None) -> di
         "company": company,
         "channel_id": channel_id,
         "status": "started",
+        "stage": "identification",
         "thread_ts": thread_ts
     }).execute()
     return result.data[0]
@@ -49,7 +54,15 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         parts = text.strip().split(" ", 1)
         company = parts[1] if len(parts) > 1 else "empresa não informada"
         discovery = create_discovery(company, channel_id, thread_ts)
-        msg = f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\nCole o holerite em Markdown para começar a extração."
+        msg = (
+            f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\n"
+            f"Antes de começar, preciso de algumas informações sobre a empresa.\n\n"
+            f"Responda em texto livre:\n"
+            f"• Número de funcionários CLT\n"
+            f"• Sistema de folha atual (ex: Totvs, ADP, Domínio, planilha)\n"
+            f"• Regime de trabalho (presencial / híbrido / remoto)\n"
+            f"• Sindicato aplicável (ou \"não sindicalizado\")"
+        )
         post_message_to_slack(channel_id, msg, thread_ts)
         return ""
 
@@ -63,7 +76,7 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
 
         rubricas = discovery.get("rubricas", [])
         if not rubricas:
-            msg = "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Cole um holerite primeiro."
+            msg = "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Complete as etapas anteriores primeiro."
             post_message_to_slack(channel_id, msg, thread_ts)
             return ""
 
@@ -72,23 +85,112 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         format_blueprint(discovery, channel_id, saved_thread_ts)
         return ""
 
-    # Verifica discovery ativo
+    # Verifica discovery ativo e roteia pelo stage
     discovery = get_active_discovery(channel_id)
 
-    if discovery:
-        saved_thread_ts = discovery.get("thread_ts") or thread_ts
-        pending = discovery.get("pending_questions", [])
+    if not discovery:
+        msg = "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
+        post_message_to_slack(channel_id, msg, thread_ts)
+        return ""
 
+    saved_thread_ts = discovery.get("thread_ts") or thread_ts
+    stage = discovery.get("stage", "identification")
+
+    if stage == "identification":
+        handle_identification(text, discovery, saved_thread_ts)
+        return ""
+
+    if stage == "cct":
+        handle_cct(text, discovery, saved_thread_ts)
+        return ""
+
+    if stage == "payslip":
+        pending = discovery.get("pending_questions", [])
         if pending and discovery["status"] == "awaiting_response":
             handle_human_response(text, discovery, pending, saved_thread_ts)
             return ""
-
         handle_payslip(text, discovery, saved_thread_ts)
         return ""
 
     msg = "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
     post_message_to_slack(channel_id, msg, thread_ts)
     return ""
+
+
+def handle_identification(text: str, discovery: dict, thread_ts: str = None) -> None:
+    """Extracts company info from free text and advances to CCT stage."""
+    response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {
+                "role": "system",
+                "content": """Você é um assistente que extrai informações de empresas a partir de texto livre.
+Extraia as informações e retorne APENAS um JSON válido, sem texto adicional:
+{
+  "num_funcionarios": "número ou faixa informada, ou null se não informado",
+  "sistema_folha": "sistema informado, ou null",
+  "regime_trabalho": "presencial, híbrido, remoto ou null",
+  "sindicato": "nome do sindicato ou 'não sindicalizado' ou null"
+}"""
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ],
+        temperature=0
+    )
+
+    try:
+        company_info = json.loads(response.choices[0].message.content)
+    except Exception:
+        company_info = {"texto_original": text}
+
+    update_discovery(discovery["id"], {
+        "company_info": company_info,
+        "stage": "cct"
+    })
+
+    msg = (
+        f"✅ Informações registradas.\n\n"
+        f"Agora cole a CCT (Convenção Coletiva de Trabalho) aplicável à empresa em texto ou Markdown.\n\n"
+        f"Se não tiver a CCT, digite `pular`."
+    )
+    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+
+
+def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
+    """Indexes CCT content and advances to payslip stage."""
+    text_clean = text.strip().lower()
+
+    if text_clean == "pular":
+        update_discovery(discovery["id"], {
+            "cct_content": None,
+            "stage": "payslip"
+        })
+        msg = "⏭️ CCT pulada. Cole o holerite em Markdown para começar a extração."
+        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        return
+
+    company = discovery.get("company", "empresa")
+    sindicato = (discovery.get("company_info") or {}).get("sindicato", "CCT")
+
+    index_document(
+        title=f"CCT — {sindicato} — {company}",
+        source=f"CCT-{company}",
+        content=text
+    )
+
+    update_discovery(discovery["id"], {
+        "cct_content": text,
+        "stage": "payslip"
+    })
+
+    msg = (
+        f"✅ CCT indexada com sucesso.\n\n"
+        f"Agora cole o holerite em Markdown para começar a extração."
+    )
+    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
 
 
 def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) -> None:
@@ -163,7 +265,6 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
         post_message_to_slack(discovery["channel_id"], msg, thread_ts)
         return
 
-    # Tudo fechado
     update_discovery(discovery["id"], {
         "rubricas": resolved,
         "pending_questions": [],
@@ -171,15 +272,11 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
         "status": "classified"
     })
 
-    msg = (
-        f"✅ Todas as rubricas esclarecidas.\n\n"
-        f"Digite `gerar` para produzir a planta final."
-    )
+    msg = "✅ Todas as rubricas esclarecidas.\n\nDigite `gerar` para produzir a planta final."
     post_message_to_slack(discovery["channel_id"], msg, thread_ts)
 
 
 def _format_pending_message(pending: list) -> str:
-    """Formats all pending rubricas into a single readable message."""
     lines = ["❓ [PERGUNTAS] Preciso de esclarecimento sobre as seguintes rubricas:\n"]
     for i, r in enumerate(pending, 1):
         lines.append(
@@ -203,13 +300,13 @@ def format_blueprint(discovery: dict, channel_id: str, thread_ts: str = None) ->
 
     pendencias = [r for r in rubricas if r.get("confianca") != "alta"]
     if pendencias:
-        linhas = ["\n⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
+        linhas = ["⚠️ [PENDÊNCIAS] Rubricas que requerem atenção antes da migração:\n"]
         for r in pendencias:
             nivel = "Revisar" if r.get("confianca") == "media" else "Decidir"
             linhas.append(f"• *{r.get('nome')}* — {nivel}: {r.get('observacao', '')}")
         pendencias_msg = "\n".join(linhas)
     else:
-        pendencias_msg = "\n✅ Sem pendências — todas as rubricas classificadas com alta confiança."
+        pendencias_msg = "✅ [PENDÊNCIAS] Sem pendências — todas as rubricas foram classificadas com alta confiança."
 
     summary = (
         f"✅ [PLANTA] Discovery concluído — *{company}*\n"
