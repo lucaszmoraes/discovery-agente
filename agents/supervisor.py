@@ -1,6 +1,8 @@
 # supervisor.py
 
 import json
+import os
+from openai import OpenAI
 from services.supabase_client import supabase
 from agents.extractor import extract_payslip
 from agents.legal import classify_all
@@ -9,8 +11,6 @@ from agents.interviewer import process_response
 from services.pdf_generator import generate_blueprint_pdf
 from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
 from services.rag import index_document
-from openai import OpenAI
-import os
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -34,7 +34,8 @@ def create_discovery(company: str, channel_id: str, thread_ts: str = None) -> di
         "channel_id": channel_id,
         "status": "started",
         "stage": "identification",
-        "thread_ts": thread_ts
+        "thread_ts": thread_ts,
+        "conversation_history": []
     }).execute()
     return result.data[0]
 
@@ -46,6 +47,20 @@ def update_discovery(discovery_id: str, updates: dict):
         .execute()
 
 
+def append_to_history(discovery: dict, role: str, content: str) -> list:
+    """Appends a message to conversation history and saves to Supabase."""
+    history = discovery.get("conversation_history") or []
+    history.append({"role": role, "content": content})
+    update_discovery(discovery["id"], {"conversation_history": history})
+    return history
+
+
+def reply(discovery: dict, msg: str, thread_ts: str = None) -> None:
+    """Posts a message to Slack and saves it to conversation history."""
+    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+    append_to_history(discovery, "assistant", msg)
+
+
 def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
     text_clean = text.strip().lower()
 
@@ -54,6 +69,7 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         parts = text.strip().split(" ", 1)
         company = parts[1] if len(parts) > 1 else "empresa não informada"
         discovery = create_discovery(company, channel_id, thread_ts)
+        append_to_history(discovery, "user", text)
         msg = (
             f"🔍 [DISCOVERY] Discovery iniciado para *{company}*.\n\n"
             f"Antes de começar, preciso de algumas informações sobre a empresa.\n\n"
@@ -63,7 +79,7 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
             f"• Regime de trabalho (presencial / híbrido / remoto)\n"
             f"• Sindicato aplicável (ou \"não sindicalizado\")"
         )
-        post_message_to_slack(channel_id, msg, thread_ts)
+        reply(discovery, msg, thread_ts)
         return ""
 
     # Comando: gerar
@@ -77,9 +93,10 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         rubricas = discovery.get("rubricas", [])
         if not rubricas:
             msg = "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Complete as etapas anteriores primeiro."
-            post_message_to_slack(channel_id, msg, thread_ts)
+            reply(discovery, msg, thread_ts)
             return ""
 
+        append_to_history(discovery, "user", text)
         update_discovery(discovery["id"], {"status": "completed"})
         saved_thread_ts = discovery.get("thread_ts") or thread_ts
         format_blueprint(discovery, channel_id, saved_thread_ts)
@@ -93,6 +110,7 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         post_message_to_slack(channel_id, msg, thread_ts)
         return ""
 
+    append_to_history(discovery, "user", text)
     saved_thread_ts = discovery.get("thread_ts") or thread_ts
     stage = discovery.get("stage", "identification")
 
@@ -118,7 +136,6 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
 
 
 def handle_identification(text: str, discovery: dict, thread_ts: str = None) -> None:
-    """Extracts company info from free text and advances to CCT stage."""
     response = client.chat.completions.create(
         model="gpt-4.1",
         messages=[
@@ -156,11 +173,10 @@ Extraia as informações e retorne APENAS um JSON válido, sem texto adicional:
         f"Agora cole a CCT (Convenção Coletiva de Trabalho) aplicável à empresa em texto ou Markdown.\n\n"
         f"Se não tiver a CCT, digite `pular`."
     )
-    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+    reply(discovery, msg, thread_ts)
 
 
 def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
-    """Indexes CCT content and advances to payslip stage."""
     text_clean = text.strip().lower()
 
     if text_clean == "pular":
@@ -169,7 +185,7 @@ def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
             "stage": "payslip"
         })
         msg = "⏭️ CCT pulada. Cole o holerite em Markdown para começar a extração."
-        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        reply(discovery, msg, thread_ts)
         return
 
     company = discovery.get("company", "empresa")
@@ -186,11 +202,8 @@ def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
         "stage": "payslip"
     })
 
-    msg = (
-        f"✅ CCT indexada com sucesso.\n\n"
-        f"Agora cole o holerite em Markdown para começar a extração."
-    )
-    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+    msg = "✅ CCT indexada com sucesso.\n\nAgora cole o holerite em Markdown para começar a extração."
+    reply(discovery, msg, thread_ts)
 
 
 def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) -> None:
@@ -219,7 +232,7 @@ def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) ->
             f"Responda sobre quantas quiser em uma ou mais mensagens. "
             f"Quando terminar, digite `gerar`."
         )
-        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        reply(discovery, msg, thread_ts)
         return
 
     updates["status"] = "classified"
@@ -232,11 +245,12 @@ def handle_payslip(payslip_text: str, discovery: dict, thread_ts: str = None) ->
         f"*{discovery['company']}* com alta confiança.\n\n"
         f"Digite `gerar` para produzir a planta final."
     )
-    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+    reply(discovery, msg, thread_ts)
 
 
 def handle_human_response(response_text: str, discovery: dict, pending: list, thread_ts: str = None) -> None:
-    result = process_response(response_text, pending)
+    history = discovery.get("conversation_history") or []
+    result = process_response(response_text, pending, history)
 
     closed = result["closed"]
     still_pending = result["still_pending"]
@@ -262,7 +276,7 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
             f"{_format_pending_message(still_pending)}\n\n"
             f"Responda sobre quantas quiser, ou digite `gerar` para fechar com as pendências marcadas."
         )
-        post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+        reply(discovery, msg, thread_ts)
         return
 
     update_discovery(discovery["id"], {
@@ -273,7 +287,7 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
     })
 
     msg = "✅ Todas as rubricas esclarecidas.\n\nDigite `gerar` para produzir a planta final."
-    post_message_to_slack(discovery["channel_id"], msg, thread_ts)
+    reply(discovery, msg, thread_ts)
 
 
 def _format_pending_message(pending: list) -> str:
