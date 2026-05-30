@@ -1,17 +1,15 @@
+# blueprint.py
+
 import os
 import json
 from openai import OpenAI
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-
-def generate_calculation_order(rubricas: list) -> dict:
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {
-                "role": "system",
-                "content": """Você é um especialista em folha de pagamento brasileira (regime CLT).
+AGENT = {
+    "name": "blueprint",
+    "description": "Gera a planta de cálculo completa da folha: ordem de cálculo, dependências entre rubricas, bases de INSS/IRRF/FGTS e fórmula do líquido. Deve ser acionado quando todas as rubricas estiverem classificadas e o usuário digitar 'gerar'.",
+    "system_prompt": """Você é um especialista em folha de pagamento brasileira (regime CLT).
 Dada uma lista de rubricas classificadas, sua tarefa é determinar a ordem correta de cálculo para que o salário líquido seja calculado corretamente.
 
 Regras obrigatórias de ordem:
@@ -43,19 +41,23 @@ Retorne APENAS um JSON válido, sem texto adicional, no formato:
   },
   "formula_liquido": "descrição da fórmula final do líquido"
 }"""
-            },
+}
+
+
+def generate_calculation_order(rubricas: list) -> dict:
+    response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": AGENT["system_prompt"]},
             {
                 "role": "user",
-                "content": f"""Gere o grafo de ordem de cálculo para estas rubricas:
-
-{json.dumps(rubricas, ensure_ascii=False, indent=2)}"""
+                "content": f"Gere o grafo de ordem de cálculo para estas rubricas:\n\n{json.dumps(rubricas, ensure_ascii=False, indent=2)}"
             }
         ],
         temperature=0
     )
 
-    content = response.choices[0].message.content
-    content = content.strip()
+    content = response.choices[0].message.content.strip()
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):

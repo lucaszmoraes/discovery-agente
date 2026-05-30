@@ -4,15 +4,43 @@ import json
 import os
 from openai import OpenAI
 from services.supabase_client import supabase
-from agents.extractor import extract_payslip
+from agents.extractor import extract_payslip, AGENT as EXTRACTOR
 from agents.legal import classify_all
-from agents.blueprint import generate_calculation_order
-from agents.interviewer import process_response
+from agents.blueprint import generate_calculation_order, AGENT as BLUEPRINT
+from agents.interviewer import process_response, AGENT as INTERVIEWER
 from services.pdf_generator import generate_blueprint_pdf
 from services.slack_uploader import upload_pdf_to_slack, post_message_to_slack
 from services.rag import index_document
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+SUPERVISOR_SYSTEM_PROMPT = """Você é o orquestrador de um sistema de discovery de folha de pagamento.
+Seu papel é analisar o histórico da conversa e o estado atual do discovery para decidir qual ação tomar.
+
+AGENTES DISPONÍVEIS:
+- "extractor": {extractor_desc}
+- "interviewer": {interviewer_desc}
+- "blueprint": {blueprint_desc}
+- "identification": coletar informações básicas da empresa (funcionários, sistema de folha, regime de trabalho, sindicato)
+- "cct": receber e indexar a CCT (Convenção Coletiva de Trabalho) da empresa
+- "respond": responder diretamente ao usuário sem acionar agente (para dúvidas, comandos inválidos, mensagens fora de contexto)
+
+REGRAS DE DECISÃO:
+1. Se não há discovery ativo e o usuário não usou "iniciar [empresa]" → "respond" orientando o usuário
+2. Se stage = "identification" → "identification" para extrair dados da empresa
+3. Se stage = "cct" → "cct" para receber a CCT (ou pular)
+4. Se stage = "payslip" e não há rubricas ainda → "extractor" se o usuário colou um holerite
+5. Se stage = "payslip" e há rubricas pendentes → "interviewer" se o usuário enviou uma resposta sobre as rubricas
+6. Se o usuário disse "gerar" e há rubricas classificadas → "blueprint"
+7. Se o usuário disse "gerar" mas não há rubricas → "respond" orientando a colar um holerite primeiro
+8. Em caso de dúvida → "respond"
+
+Retorne APENAS um JSON válido, sem texto adicional:
+{{
+  "action": "extractor" | "interviewer" | "blueprint" | "identification" | "cct" | "respond",
+  "justificativa": "por que você escolheu essa ação",
+  "mensagem_direta": "mensagem para o usuário — preencha APENAS se action = respond, caso contrário null"
+}}"""
 
 
 def get_active_discovery(channel_id: str) -> dict | None:
@@ -48,7 +76,6 @@ def update_discovery(discovery_id: str, updates: dict):
 
 
 def append_to_history(discovery: dict, role: str, content: str) -> list:
-    """Appends a message to conversation history and saves to Supabase."""
     history = discovery.get("conversation_history") or []
     history.append({"role": role, "content": content})
     update_discovery(discovery["id"], {"conversation_history": history})
@@ -56,15 +83,56 @@ def append_to_history(discovery: dict, role: str, content: str) -> list:
 
 
 def reply(discovery: dict, msg: str, thread_ts: str = None) -> None:
-    """Posts a message to Slack and saves it to conversation history."""
     post_message_to_slack(discovery["channel_id"], msg, thread_ts)
     append_to_history(discovery, "assistant", msg)
+
+
+def orchestrate(text: str, discovery: dict | None) -> dict:
+    """Calls the LLM to decide which agent to activate."""
+    system_prompt = SUPERVISOR_SYSTEM_PROMPT.format(
+        extractor_desc=EXTRACTOR["description"],
+        interviewer_desc=INTERVIEWER["description"],
+        blueprint_desc=BLUEPRINT["description"]
+    )
+
+    state_summary = "Nenhum discovery ativo."
+    if discovery:
+        state_summary = f"""Discovery ativo: {discovery.get('company')}
+Stage: {discovery.get('stage')}
+Status: {discovery.get('status')}
+Rubricas classificadas: {len(discovery.get('rubricas') or [])}
+Rubricas pendentes: {len(discovery.get('pending_questions') or [])}"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    history = (discovery.get("conversation_history") or []) if discovery else []
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    messages.append({
+        "role": "user",
+        "content": f"""Estado atual:
+{state_summary}
+
+Nova mensagem do usuário:
+{text}
+
+Qual ação devo tomar?"""
+    })
+
+    response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=messages,
+        temperature=0
+    )
+
+    return json.loads(response.choices[0].message.content)
 
 
 def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
     text_clean = text.strip().lower()
 
-    # Comando: iniciar [empresa]
+    # Comando iniciar — único tratado antes da orquestração
     if text_clean.startswith("iniciar"):
         parts = text.strip().split(" ", 1)
         company = parts[1] if len(parts) > 1 else "empresa não informada"
@@ -82,56 +150,43 @@ def handle_message(text: str, channel_id: str, thread_ts: str = None) -> str:
         reply(discovery, msg, thread_ts)
         return ""
 
-    # Comando: gerar
-    if text_clean == "gerar":
-        discovery = get_active_discovery(channel_id)
-        if not discovery:
-            msg = "❌ Nenhum discovery ativo neste canal. Use `iniciar [empresa]` para começar."
-            post_message_to_slack(channel_id, msg, thread_ts)
-            return ""
-
-        rubricas = discovery.get("rubricas", [])
-        if not rubricas:
-            msg = "⚠️ [RISCO] Nenhuma rubrica classificada ainda. Complete as etapas anteriores primeiro."
-            reply(discovery, msg, thread_ts)
-            return ""
-
-        append_to_history(discovery, "user", text)
-        update_discovery(discovery["id"], {"status": "completed"})
-        saved_thread_ts = discovery.get("thread_ts") or thread_ts
-        format_blueprint(discovery, channel_id, saved_thread_ts)
-        return ""
-
-    # Verifica discovery ativo e roteia pelo stage
     discovery = get_active_discovery(channel_id)
 
-    if not discovery:
-        msg = "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
-        post_message_to_slack(channel_id, msg, thread_ts)
-        return ""
+    if discovery:
+        append_to_history(discovery, "user", text)
+        # Recarrega discovery com histórico atualizado
+        discovery = get_active_discovery(channel_id)
 
-    append_to_history(discovery, "user", text)
-    saved_thread_ts = discovery.get("thread_ts") or thread_ts
-    stage = discovery.get("stage", "identification")
+    saved_thread_ts = discovery.get("thread_ts") if discovery else thread_ts
 
-    if stage == "identification":
+    # LLM decide qual agente acionar
+    decision = orchestrate(text, discovery)
+    action = decision.get("action")
+
+    if action == "identification":
         handle_identification(text, discovery, saved_thread_ts)
-        return ""
 
-    if stage == "cct":
+    elif action == "cct":
         handle_cct(text, discovery, saved_thread_ts)
-        return ""
 
-    if stage == "payslip":
-        pending = discovery.get("pending_questions", [])
-        if pending and discovery["status"] == "awaiting_response":
-            handle_human_response(text, discovery, pending, saved_thread_ts)
-            return ""
+    elif action == "extractor":
         handle_payslip(text, discovery, saved_thread_ts)
-        return ""
 
-    msg = "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
-    post_message_to_slack(channel_id, msg, thread_ts)
+    elif action == "interviewer":
+        pending = discovery.get("pending_questions", [])
+        handle_human_response(text, discovery, pending, saved_thread_ts)
+
+    elif action == "blueprint":
+        update_discovery(discovery["id"], {"status": "completed"})
+        format_blueprint(discovery, channel_id, saved_thread_ts)
+
+    else:  # respond
+        msg = decision.get("mensagem_direta") or "ℹ️ Nenhum discovery ativo. Use `iniciar [empresa]` para começar."
+        if discovery:
+            reply(discovery, msg, saved_thread_ts)
+        else:
+            post_message_to_slack(channel_id, msg, thread_ts)
+
     return ""
 
 
@@ -150,10 +205,7 @@ Extraia as informações e retorne APENAS um JSON válido, sem texto adicional:
   "sindicato": "nome do sindicato ou 'não sindicalizado' ou null"
 }"""
             },
-            {
-                "role": "user",
-                "content": text
-            }
+            {"role": "user", "content": text}
         ],
         temperature=0
     )
@@ -177,13 +229,8 @@ Extraia as informações e retorne APENAS um JSON válido, sem texto adicional:
 
 
 def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
-    text_clean = text.strip().lower()
-
-    if text_clean == "pular":
-        update_discovery(discovery["id"], {
-            "cct_content": None,
-            "stage": "payslip"
-        })
+    if text.strip().lower() == "pular":
+        update_discovery(discovery["id"], {"cct_content": None, "stage": "payslip"})
         msg = "⏭️ CCT pulada. Cole o holerite em Markdown para começar a extração."
         reply(discovery, msg, thread_ts)
         return
@@ -197,11 +244,7 @@ def handle_cct(text: str, discovery: dict, thread_ts: str = None) -> None:
         content=text
     )
 
-    update_discovery(discovery["id"], {
-        "cct_content": text,
-        "stage": "payslip"
-    })
-
+    update_discovery(discovery["id"], {"cct_content": text, "stage": "payslip"})
     msg = "✅ CCT indexada com sucesso.\n\nAgora cole o holerite em Markdown para começar a extração."
     reply(discovery, msg, thread_ts)
 
@@ -254,7 +297,6 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
 
     closed = result["closed"]
     still_pending = result["still_pending"]
-
     resolved = discovery.get("rubricas", []) + closed
 
     if still_pending:
@@ -265,10 +307,7 @@ def handle_human_response(response_text: str, discovery: dict, pending: list, th
         })
 
         closed_names = [r["nome"] for r in closed]
-        closed_text = (
-            f"✅ Esclarecidas: {', '.join(closed_names)}\n\n"
-            if closed_names else ""
-        )
+        closed_text = f"✅ Esclarecidas: {', '.join(closed_names)}\n\n" if closed_names else ""
 
         msg = (
             f"{closed_text}"
